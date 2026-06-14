@@ -233,27 +233,41 @@ describe("runWatchDaemon", () => {
   }, 10_000);
 
   it("stays alive past startup (regression: collector flushTimer must not be unref'd)", async () => {
-    // Spawns the real bin in a subprocess and verifies it is still alive
+    // Spawns the daemon from SOURCE via tsx and verifies it is still alive
     // 1.5 s after launch. Before the keep-alive fix, the daemon exited
     // silently within milliseconds of "Token collector started" because the
     // flush interval was unref'd and chokidar's persistent flag did not hold
     // the event loop open under macOS + iCloud Drive paths.
-    const binPath = path.join(REPO_ROOT, "dist", "src", "bin.js");
-    const binExists = await fs.promises
-      .access(binPath)
-      .then(() => true)
-      .catch(() => false);
-    if (!binExists) {
-      // Build hasn't run; skip without failing the suite.
-      return;
-    }
+    //
+    // Why tsx (not dist/src/bin.js)?
+    // CI runs: npm ci → typecheck → npm test → npm run build
+    // Tests run BEFORE the build, so dist/ does not exist on a fresh checkout.
+    // The old guard (binExists early return) silently skipped this test in CI,
+    // letting the regression go undetected. Running from source via tsx removes
+    // the dist/ dependency entirely — the test now executes on every CI matrix
+    // cell, every local run, and during prepublishOnly. Real built-artifact
+    // coverage is owned by smoke-pack.yml.
+    //
+    // Why strip VITEST from the subprocess env?
+    // src/cli.tsx:211 guards its auto-run with `if (process.env.VITEST !== "true")`.
+    // The subprocess inherits env from vitest; without stripping it, main() never
+    // runs, the daemon never starts, and the process exits immediately (code 0),
+    // causing this assertion to pass spuriously. The allowlist below builds the
+    // subprocess env from scratch so we're immune to whatever vitest injects next.
+    const tsxBin = path.join(REPO_ROOT, "node_modules", ".bin", "tsx");
+    const srcEntry = path.join(REPO_ROOT, "src", "bin.ts");
 
-    const child = spawn(process.execPath, [binPath, "watch"], {
-      env: {
-        ...process.env,
-        GLYPHLING_HOME: tmpDir,
-        GLYPHLING_PROJECTS_DIR: process.env["GLYPHLING_PROJECTS_DIR"]!,
-      },
+    // Build a clean env that mirrors a real user invocation.
+    // Allowlist (not denylist) so new Vitest injections can't slip through.
+    const spawnEnv: NodeJS.ProcessEnv = {
+      PATH: process.env["PATH"],
+      HOME: process.env["HOME"],
+      GLYPHLING_HOME: tmpDir,
+      GLYPHLING_PROJECTS_DIR: process.env["GLYPHLING_PROJECTS_DIR"]!,
+    };
+
+    const child = spawn(tsxBin, [srcEntry, "watch"], {
+      env: spawnEnv,
       stdio: ["ignore", "ignore", "pipe"],
     });
 
